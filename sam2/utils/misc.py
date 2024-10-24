@@ -141,8 +141,8 @@ class AsyncVideoFrameLoader:
             except Exception as e:
                 self.exception = e
 
-        self.thread = Thread(target=_load_frames, daemon=True)
-        self.thread.start()
+        # self.thread = Thread(target=_load_frames, daemon=True)
+        # self.thread.start()
 
     def __getitem__(self, index):
         if self.exception is not None:
@@ -162,7 +162,7 @@ class AsyncVideoFrameLoader:
         img /= self.img_std
         if not self.offload_video_to_cpu:
             img = img.to(self.compute_device, non_blocking=True)
-        self.images[index] = img
+        # self.images[index] = img
         return img
 
     def __len__(self):
