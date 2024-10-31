@@ -47,7 +47,7 @@ def get_larva_detections(video_path, detection_model, steps=30, num_larvae=5):
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = cap.read()
 
-        results = detection_model.predict(frame)  # return a list of Results objects
+        results = detection_model.predict(frame, verbose=False)  # return a list of Results objects
         result = results[0]
 
         boxes = result.boxes
@@ -96,7 +96,7 @@ def extract_frames_ffmpeg(video_path, output_dir, quality=2, start_number=0, fil
         output_path, 
         q=quality,  # Quality for the frames
         start_number=start_number  # Start number for frame file names
-    ).run()
+    ).run(quiet=True)
 
 
 def get_track_data(mask, h, w):
@@ -177,7 +177,7 @@ def get_frame_data_subset(frame_dict, step=1):
     return data
 
 
-def smooth_distances_velocities(frame_dict, window=1, fps=30, scale_factor=0.05):
+def smooth_distances_velocities_angles(frame_dict, window=1, fps=30, scale_factor=0.05):
     """
     Convert frame numbers to data per second.
     
@@ -203,10 +203,15 @@ def smooth_distances_velocities(frame_dict, window=1, fps=30, scale_factor=0.05)
         velocities = pd.Series(velocities)
         velocities_moving_averages = velocities.rolling(window=window, min_periods=1).mean()
 
+        angles = np.array([item[obj_id]['angle (degrees)'] for index, item in data.items()])
+        angles = pd.Series(angles)
+        angles_moving_averages = angles.rolling(window=window, min_periods=1).mean()
+
         for frame in range(n_frames):
             data[frame][obj_id]['distance (pixels)'] = distances_moving_averages[frame]
             data[frame][obj_id]['velocity (pixels/frame)'] = velocities_moving_averages[frame]
             data[frame][obj_id]['velocity (mm/second)'] = velocities_moving_averages[frame] * fps * scale_factor
+            data[frame][obj_id]['angle (degrees)'] = angles_moving_averages[frame]
             if data[frame][obj_id]['distance (pixels)'] == 0:
                 data[frame][obj_id]['is stationary'] = 1
             else:
@@ -215,30 +220,55 @@ def smooth_distances_velocities(frame_dict, window=1, fps=30, scale_factor=0.05)
     return data
 
 
+def calculate_heading_angle(point1, point2, point3):
+    # Define vectors based on the points
+    vector_a = np.array([point2[0] - point1[0], point2[1] - point1[1]])
+    vector_b = np.array([point3[0] - point2[0], point3[1] - point2[1]])
+    
+    # Calculate dot product and magnitudes of vectors
+    dot_product = np.dot(vector_a, vector_b)
+    magnitude_a = np.linalg.norm(vector_a)
+    magnitude_b = np.linalg.norm(vector_b)
+    
+    # Calculate the angle in radians and then convert to degrees
+    angle_rad = np.arccos(dot_product / (magnitude_a * magnitude_b))
+    angle_deg = np.degrees(angle_rad)
+    
+    return angle_deg
+
+
 def add_raw_data(data_obj, fps=30, scale_factor=0.05):
     data = copy.deepcopy(data_obj)
     
     # initialize data for frame 0
     first_frame = 0
     obj_ids = list(data[first_frame].keys())
-    for obj_id in obj_ids:
-        data[first_frame][obj_id]['size (mm2)'] = data[first_frame][obj_id]['size (pixels)'] * (scale_factor**2)
-        data[first_frame][obj_id]['distance (pixels)'] = 0
-        data[first_frame][obj_id]['distance (mm)'] = 0
-        data[first_frame][obj_id]['velocity (pixels/frame)'] = 0
-        data[first_frame][obj_id]['velocity (mm/second)'] = 0
-        # data[first_frame][obj_id]['delta_velocity'] = 0
-        # data[first_frame][obj_id]['angle (degrees)'] = 0
-        # data[first_frame][obj_id]['angular velocity (degrees/frame)'] = 0
-        # data[first_frame][obj_id]['angular velocity (degrees/second)'] = 0
-        # data[first_frame][obj_id]['delta_angular_velocity'] = 0
-        data[first_frame][obj_id]['is stationary'] = 0
+    # for obj_id in obj_ids:
+    #     data[first_frame][obj_id]['size (mm2)'] = data[first_frame][obj_id]['size (pixels)'] * (scale_factor**2)
+    #     data[first_frame][obj_id]['distance (pixels)'] = 0
+    #     data[first_frame][obj_id]['distance (mm)'] = 0
+    #     data[first_frame][obj_id]['velocity (pixels/frame)'] = 0
+    #     data[first_frame][obj_id]['velocity (mm/second)'] = 0
+    #     # data[first_frame][obj_id]['delta_velocity'] = 0
+    #     data[first_frame][obj_id]['angle (degrees)'] = 0
+    #     data[first_frame][obj_id]['is stationary'] = 0
 
     # propagate across frames
-    for frame_index in range(1, len(data)):
+    for frame_index in range(0, len(data)):
         for obj_id in obj_ids:
             # calculated data from previous frame
             previous_frame_index = frame_index - 1
+            
+            if previous_frame_index < 0:
+                data[frame_index][obj_id]['size (mm2)'] = data[frame_index][obj_id]['size (pixels)'] * (scale_factor**2)
+                data[frame_index][obj_id]['distance (pixels)'] = 0
+                data[frame_index][obj_id]['distance (mm)'] = 0
+                data[frame_index][obj_id]['velocity (pixels/frame)'] = 0
+                data[frame_index][obj_id]['velocity (mm/second)'] = 0
+                # data[frame_index][obj_id]['delta_velocity'] = 0
+                data[frame_index][obj_id]['angle (degrees)'] = 0
+                data[frame_index][obj_id]['is stationary'] = 0
+                continue
 
             current_frame_data = data[frame_index][obj_id]
             previous_frame_data = data[previous_frame_index][obj_id]
@@ -263,23 +293,23 @@ def add_raw_data(data_obj, fps=30, scale_factor=0.05):
             # delta_velocity = current_frame_data['velocity'] - previous_frame_data['velocity']
             # current_frame_data['delta_velocity'] = delta_velocity
 
-            # calculate angle
-            # Calculate the differences in x and y
-            # dx = current_point[0] - previous_point[0]
-            # dy = current_point[1] - previous_point[1]
+            # calculate angle of heading
+            point1_frame_index = frame_index - 2
+            point2_frame_index = frame_index - 1
+            point3_frame_index = frame_index
 
-            # Calculate the angle using arctan2
-            # angle = np.degrees(np.arctan2(dy, dx))
-            # current_frame_data['angle (degrees)'] = angle
+            if point1_frame_index < 0:
+                current_frame_data['angle (degrees)'] = 0
+            else:
+                point1 = (data[point1_frame_index][obj_id]['centre x'], data[point1_frame_index][obj_id]['centre y'])
+                point2 = (data[point2_frame_index][obj_id]['centre x'], data[point2_frame_index][obj_id]['centre y'])
+                point3 = (data[point3_frame_index][obj_id]['centre x'], data[point3_frame_index][obj_id]['centre y'])
 
-            # calculate angular velocity
-            # angular_velocity = current_frame_data['angle (degrees)']
-            # current_frame_data['angular velocity (degrees/frame)'] = angular_velocity
-            # current_frame_data['angular velocity (degrees/second)'] = angular_velocity * fps
-
-            # calculate change in angular velocity
-            # delta_angular_velocity = current_frame_data['angular_velocity'] - previous_frame_data['angular_velocity']
-            # current_frame_data['delta_angular_velocity'] = delta_angular_velocity
+                angle = calculate_heading_angle(point1, point2, point3)
+                if np.isnan(angle):
+                    current_frame_data['angle (degrees)'] = 0
+                else:
+                    current_frame_data['angle (degrees)'] = angle
 
             # set is_stationary
             if current_frame_data['distance (pixels)'] == 0:
@@ -297,11 +327,6 @@ def random_walk_modeling(values):
 
     # Perform linear regression
     slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-
-    # Plot data and regression line
-    # plt.scatter(x, y)
-    # plt.plot(x, slope * x + intercept, 'r')
-    # plt.show()
 
     return slope, intercept, r_value, p_value, std_err
 
@@ -381,23 +406,10 @@ def get_aggregated_data(data, fps=30, scale_factor=0.05):
         slope, intercept, r_value, p_value, std_err = random_walk_modeling(velocities)
         temp_data['correlation coefficient for velocities'] = r_value
 
-        # velocities = np.array([item[obj_id]['velocity (pixels/frame)'] for index, item in data.items()])
-        # slope, intercept, r_value, p_value, std_err = random_walk_modeling(velocities)
-        # temp_data['correlation coefficient for velocities (pixels/frame)'] = r_value
-
-        # velocities = np.array([item[obj_id]['velocity (pixels/second)'] for index, item in data.items()])
-        # slope, intercept, r_value, p_value, std_err = random_walk_modeling(velocities)
-        # temp_data['correlation coefficient for velocities (pixels/second)'] = r_value
-
         # calculate coefficient of correlation for angular velocities
-        # angular_velocities = np.array([item[obj_id]['angular velocity (degrees/frame)'] for index, item in data.items()])
-        # slope, intercept, r_value, p_value, std_err = random_walk_modeling(angular_velocities)
-        # temp_data['correlation coefficient for angular velocities (degrees/frame)'] = r_value
-
-        # calculate coefficient of correlation for angular velocities
-        # angular_velocities = np.array([item[obj_id]['angular velocity (degrees/second)'] for index, item in data.items()])
-        # slope, intercept, r_value, p_value, std_err = random_walk_modeling(angular_velocities)
-        # temp_data['correlation coefficient for angular velocities (degrees/second)'] = r_value
+        angular_velocities = np.array([item[obj_id]['angle (degrees)'] for index, item in data.items()])
+        slope, intercept, r_value, p_value, std_err = random_walk_modeling(angular_velocities)
+        temp_data['correlation coefficient for angles'] = r_value
 
         # calculate Pearson correlation coefficient
         # x = np.array([item[obj_id]['velocity (pixels/frame)'] for index, item in data.items()])[:-2]
