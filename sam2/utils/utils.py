@@ -209,6 +209,7 @@ def smooth_distances_velocities_angles(frame_dict, window=1, fps=30, scale_facto
 
         for frame in range(n_frames):
             data[frame][obj_id]['distance (pixels)'] = distances_moving_averages[frame]
+            data[frame][obj_id]['distance (mm)'] = distances_moving_averages[frame] * scale_factor
             data[frame][obj_id]['velocity (pixels/frame)'] = velocities_moving_averages[frame]
             data[frame][obj_id]['velocity (mm/second)'] = velocities_moving_averages[frame] * fps * scale_factor
             data[frame][obj_id]['angle (degrees)'] = angles_moving_averages[frame]
