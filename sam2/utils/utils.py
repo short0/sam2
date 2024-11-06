@@ -99,61 +99,52 @@ def extract_frames_ffmpeg(video_path, output_dir, quality=2, start_number=0, fil
     ).run(quiet=True)
 
 
-def get_track_data(mask, h, w):
-    track_data = {}
-    # for drawing predictions on video
-    line_mask = Masks(torch.tensor(mask), (h, w)).xy[0]
-    # bbox_xyxy = mask_to_bbox(mask.squeeze())
-    # bbox_xywh = Boxes(torch.tensor([[*bbox_xyxy, 0., 0]]), (h, w)).xywh[0]
+def get_track_data_batch(masks, h, w):
+    track_data_batch = []
 
-    track_data['line mask'] = line_mask
-    # track_data['bbox_xyxy'] = bbox_xyxy
-    centroid_point = Polygon(line_mask).centroid
-
-    # for collecting data
-    # centre_x, center_y = bbox_xywh[0], bbox_xywh[1]
-    size_in_pixels = mask.sum()
-
-    track_data['centre x'] = int(centroid_point.x)
-    track_data['centre y'] = int(centroid_point.y)
-    track_data['size (pixels)'] = size_in_pixels
-
-    return track_data
-
+    # Process each mask in the batch
+    for mask in masks:
+        track_data = {}
+        
+        # Generate line mask and calculate centroid in one go for efficiency
+        line_mask = Masks(torch.tensor(mask), (h, w)).xy[0]
+        centroid_point = Polygon(line_mask).centroid
+        
+        # Calculate mask size
+        size_in_pixels = mask.sum()
+        
+        # Populate track data dictionary
+        track_data['line mask'] = line_mask
+        track_data['centre x'] = int(centroid_point.x)
+        track_data['centre y'] = int(centroid_point.y)
+        track_data['size (pixels)'] = size_in_pixels
+        
+        track_data_batch.append(track_data)
+    
+    return track_data_batch
 
 def get_video_segments(predictor, inference_state, h, w):
-    # run propagation throughout the video and collect the results in a dict
-    video_segments = {}  # video_segments contains the per-frame segmentation results
+    video_segments = defaultdict(dict)  # Use defaultdict to handle both forward and backward frames
 
-    # predict forwards
-    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=False):
-        data = {}
-        for i, out_obj_id in enumerate(out_obj_ids):
-            mask = (out_mask_logits[i] > 0.0).cpu().numpy()
+    # Function to process both forward and backward propagation
+    def propagate_and_store(reverse=False):
+        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=reverse):
+            # Convert all masks at once for a single frame
+            masks = [(out_mask_logits[i] > 0.0).cpu().numpy() for i in range(len(out_obj_ids))]
+            
+            # Get track data batch (optimized version)
+            track_data_batch = get_track_data_batch(masks, h, w)
+            
+            # Store data for each object ID in the frame
+            for i, out_obj_id in enumerate(out_obj_ids):
+                video_segments[out_frame_idx][out_obj_id] = track_data_batch[i]
 
-            track_data = get_track_data(mask, h, w)
+    # Run both forward and backward propagation, avoiding duplicate overwrites
+    propagate_and_store(reverse=False)
+    propagate_and_store(reverse=True)
 
-            # add data to an object
-            data[out_obj_id] = track_data
-        
-        # add data to a frame
-        video_segments[out_frame_idx] = data
-
-    # predict backwards
-    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=True):
-        data = {}
-        for i, out_obj_id in enumerate(out_obj_ids):
-            mask = (out_mask_logits[i] > 0.0).cpu().numpy()
-
-            track_data = get_track_data(mask, h, w)
-
-            # add data to an object
-            data[out_obj_id] = track_data
-        
-        # add data to a frame
-        video_segments[out_frame_idx] = data
-
-    video_segments = dict(sorted(video_segments.items()))  # sort by frame number
+    # Sort the video segments by frame number
+    video_segments = dict(sorted(video_segments.items()))
 
     return video_segments
 
@@ -590,6 +581,7 @@ def draw_sizes(out_dir, sizes_dir, data, total_frames, tick_every_seconds=10, fp
 def draw_on_video(video_path, out_dir, out_video_name, video_segments, fps, h, w, duration_of_tracking_path=10):
     # Dictionary to store tracking history with default empty lists
     track_history = defaultdict(lambda: [])
+    colors_cache = {}  # Cache colors to avoid recomputation
 
     # Open the video file
     cap = cv2.VideoCapture(video_path)
@@ -602,27 +594,31 @@ def draw_on_video(video_path, out_dir, out_video_name, video_segments, fps, h, w
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     for frame_index in tqdm(range(frame_count)):
-        # Read frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        # Read frame (automatically advances, so no need for `cap.set`)
         ret, frame = cap.read()
 
-        # Create an annotator object to draw on the frame
+        if not ret:
+            break
+
+        # Create or reuse annotator for the frame
         annotator = Annotator(frame, line_width=2)
 
-        results = video_segments[frame_index]
+        results = video_segments.get(frame_index, {})  # Get current frame results
 
         for track_id, data in results.items():
-            annotator.seg_bbox(mask=data['line mask'], mask_color=colors(track_id+4, True), label=str(track_id))
+            if track_id not in colors_cache:
+                colors_cache[track_id] = colors(track_id + 4, True)
+
+            annotator.seg_bbox(mask=data['line mask'], mask_color=colors_cache[track_id], label=str(track_id))
 
             track = track_history[track_id]
             track.append((data['centre x'], data['centre y']))
             if len(track) > fps * duration_of_tracking_path:
                 track.pop(0)
-            points = np.hstack(track).astype(np.int32).reshape((-1, 1, 2))
-            cv2.polylines(frame, [points], isClosed=False, color=colors(track_id+4, True), thickness=2)
+                
+            points = np.array(track, dtype=np.int32).reshape((-1, 1, 2))  # Avoid type conversion
 
-            # im0 = overlay_mask(im0, mask.squeeze(), color=colors(track_id+4, True))
-            # annotator.box_label(box=data['bbox_xyxy'], label=None, color=colors(track_id+4, True), txt_color=(255, 255, 255), rotated=False)
+            cv2.polylines(frame, [points], isClosed=False, color=colors_cache[track_id], thickness=2)
 
         # Write the annotated frame to the output video
         out.write(frame)
@@ -630,6 +626,7 @@ def draw_on_video(video_path, out_dir, out_video_name, video_segments, fps, h, w
     # Release the video writer and capture objects, and close all OpenCV windows
     out.release()
     cap.release()
+
 
 
 
