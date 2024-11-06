@@ -99,52 +99,61 @@ def extract_frames_ffmpeg(video_path, output_dir, quality=2, start_number=0, fil
     ).run(quiet=True)
 
 
-def get_track_data_batch(masks, h, w):
-    track_data_batch = []
+def get_track_data(mask, h, w):
+    track_data = {}
+    # for drawing predictions on video
+    line_mask = Masks(torch.tensor(mask), (h, w)).xy[0]
+    # bbox_xyxy = mask_to_bbox(mask.squeeze())
+    # bbox_xywh = Boxes(torch.tensor([[*bbox_xyxy, 0., 0]]), (h, w)).xywh[0]
 
-    # Process each mask in the batch
-    for mask in masks:
-        track_data = {}
-        
-        # Generate line mask and calculate centroid in one go for efficiency
-        line_mask = Masks(torch.tensor(mask), (h, w)).xy[0]
-        centroid_point = Polygon(line_mask).centroid
-        
-        # Calculate mask size
-        size_in_pixels = mask.sum()
-        
-        # Populate track data dictionary
-        track_data['line mask'] = line_mask
-        track_data['centre x'] = int(centroid_point.x)
-        track_data['centre y'] = int(centroid_point.y)
-        track_data['size (pixels)'] = size_in_pixels
-        
-        track_data_batch.append(track_data)
-    
-    return track_data_batch
+    track_data['line mask'] = line_mask
+    # track_data['bbox_xyxy'] = bbox_xyxy
+    centroid_point = Polygon(line_mask).centroid
+
+    # for collecting data
+    # centre_x, center_y = bbox_xywh[0], bbox_xywh[1]
+    size_in_pixels = mask.sum()
+
+    track_data['centre x'] = int(centroid_point.x)
+    track_data['centre y'] = int(centroid_point.y)
+    track_data['size (pixels)'] = size_in_pixels
+
+    return track_data
+
 
 def get_video_segments(predictor, inference_state, h, w):
-    video_segments = defaultdict(dict)  # Use defaultdict to handle both forward and backward frames
+    # run propagation throughout the video and collect the results in a dict
+    video_segments = {}  # video_segments contains the per-frame segmentation results
 
-    # Function to process both forward and backward propagation
-    def propagate_and_store(reverse=False):
-        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=reverse):
-            # Convert all masks at once for a single frame
-            masks = [(out_mask_logits[i] > 0.0).cpu().numpy() for i in range(len(out_obj_ids))]
-            
-            # Get track data batch (optimized version)
-            track_data_batch = get_track_data_batch(masks, h, w)
-            
-            # Store data for each object ID in the frame
-            for i, out_obj_id in enumerate(out_obj_ids):
-                video_segments[out_frame_idx][out_obj_id] = track_data_batch[i]
+    # predict forwards
+    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=False):
+        data = {}
+        for i, out_obj_id in enumerate(out_obj_ids):
+            mask = (out_mask_logits[i] > 0.0).cpu().numpy()
 
-    # Run both forward and backward propagation, avoiding duplicate overwrites
-    propagate_and_store(reverse=False)
-    propagate_and_store(reverse=True)
+            track_data = get_track_data(mask, h, w)
 
-    # Sort the video segments by frame number
-    video_segments = dict(sorted(video_segments.items()))
+            # add data to an object
+            data[out_obj_id] = track_data
+        
+        # add data to a frame
+        video_segments[out_frame_idx] = data
+
+    # predict backwards
+    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state, reverse=True):
+        data = {}
+        for i, out_obj_id in enumerate(out_obj_ids):
+            mask = (out_mask_logits[i] > 0.0).cpu().numpy()
+
+            track_data = get_track_data(mask, h, w)
+
+            # add data to an object
+            data[out_obj_id] = track_data
+        
+        # add data to a frame
+        video_segments[out_frame_idx] = data
+
+    video_segments = dict(sorted(video_segments.items()))  # sort by frame number
 
     return video_segments
 
