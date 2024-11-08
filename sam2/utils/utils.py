@@ -177,7 +177,7 @@ def get_frame_data_subset(frame_dict, step=1):
     return data
 
 
-def smooth_distances_velocities_angles(frame_dict, window=1, fps=30, scale_factor=0.05, distance_pixel_threshhold=0):
+def smooth_distances_velocities_angles(frame_dict, window=1, fps=30, scale_factor=0.05, distance_pixel_threshold=0):
     """
     Convert frame numbers to data per second.
     
@@ -213,7 +213,7 @@ def smooth_distances_velocities_angles(frame_dict, window=1, fps=30, scale_facto
             data[frame][obj_id]['velocity (pixels/frame)'] = velocities_moving_averages[frame]
             data[frame][obj_id]['velocity (mm/second)'] = velocities_moving_averages[frame] * fps * scale_factor
             data[frame][obj_id]['angle (degrees)'] = angles_moving_averages[frame]
-            if data[frame][obj_id]['distance (pixels)'] <= distance_pixel_threshhold:
+            if data[frame][obj_id]['distance (pixels)'] <= distance_pixel_threshold:
                 data[frame][obj_id]['is stationary'] = 1
             else:
                 data[frame][obj_id]['is stationary'] = 0
@@ -238,7 +238,7 @@ def calculate_heading_angle(point1, point2, point3):
     return angle_deg
 
 
-def add_raw_data(data_obj, fps=30, scale_factor=0.05, distance_pixel_threshhold=0):
+def add_raw_data(data_obj, fps=30, scale_factor=0.05, distance_pixel_threshold=0):
     data = copy.deepcopy(data_obj)
     
     # initialize data for frame 0
@@ -313,7 +313,7 @@ def add_raw_data(data_obj, fps=30, scale_factor=0.05, distance_pixel_threshhold=
                     current_frame_data['angle (degrees)'] = angle
 
             # set is_stationary
-            if current_frame_data['distance (pixels)'] <= distance_pixel_threshhold:
+            if current_frame_data['distance (pixels)'] <= distance_pixel_threshold:
                 current_frame_data['is stationary'] = 1
             else:
                 current_frame_data['is stationary'] = 0
