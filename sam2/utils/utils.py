@@ -114,8 +114,12 @@ def get_track_data(mask, h, w):
     # centre_x, center_y = bbox_xywh[0], bbox_xywh[1]
     size_in_pixels = mask.sum()
 
-    track_data['centre x'] = int(centroid_point.x)
-    track_data['centre y'] = int(centroid_point.y)
+    if not centroid_point.is_empty:
+        track_data['centre x'] = int(centroid_point.x)
+        track_data['centre y'] = int(centroid_point.y)
+    else:
+        track_data['centre x'] = None
+        track_data['centre y'] = None
     track_data['size (pixels)'] = size_in_pixels
 
     return track_data
@@ -155,7 +159,40 @@ def get_video_segments(predictor, inference_state, h, w):
 
     video_segments = dict(sorted(video_segments.items()))  # sort by frame number
 
-    return video_segments
+    def process_video_segments(video_segments):
+        """
+        Process video segments dictionary by replacing missing or invalid values 
+        with the information from the previous frame of the same object.
+
+        Args:
+        video_segments (dict): Dictionary containing video segments information.
+
+        Returns:
+        dict: Processed video segments dictionary.
+        """
+
+        # Initialize an empty dictionary to store the previous frame information for each object
+        previous_frame_info = {}
+
+        # Iterate over each frame in the video segments
+        for frame_number, frame_info in video_segments.items():
+            # Iterate over each object in the frame
+            for object_id, object_info in frame_info.items():
+                # Check if object info is empty
+                if object_info:
+                    # If 'centre x' or 'centre y' is None or 'size (pixels)' is 0, 
+                    # replace with the information from previous frame of the same object
+                    if object_info['centre x'] is None or object_info['centre y'] is None or object_info['size (pixels)'] == 0:
+                        video_segments[frame_number][object_id] = previous_frame_info[object_id]
+
+                    # Update previous frame information for the object
+                    previous_frame_info[object_id] = video_segments[frame_number][object_id].copy()
+
+        return video_segments
+    
+    processed_video_segments = process_video_segments(video_segments)
+
+    return processed_video_segments
 
 
 def get_frame_data_subset(frame_dict, step=1):
