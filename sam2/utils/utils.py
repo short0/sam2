@@ -283,7 +283,7 @@ def extract_obj_ids(data):
     return obj_ids
 
 
-def add_raw_data(data_obj, fps=30, scale_factor=0.05, distance_pixel_threshold=0, std_threshold=0.5):
+def add_raw_data(data_obj, fps=30, scale_factor=0.05, std_threshold=0.5):
     data = copy.deepcopy(data_obj)
     
     # initialize data for frame 0
