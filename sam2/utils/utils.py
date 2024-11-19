@@ -1,5 +1,4 @@
 import cv2
-from ultralytics import YOLO
 import matplotlib.pyplot as plt
 import ffmpeg
 import os
@@ -99,28 +98,78 @@ def extract_frames_ffmpeg(video_path, output_dir, quality=2, start_number=0, fil
     ).run(quiet=True)
 
 
+def fit_ellipse_to_mask(mask):
+    """
+    Fits an ellipse to a boolean mask where the object is located.
+
+    Parameters:
+    - mask: numpy array, a boolean mask with True values representing the object.
+
+    Returns:
+    - center: tuple (x, y) representing the center of the ellipse.
+    - axes: tuple (major_axis_length, minor_axis_length) representing the lengths of the major and minor axes.
+    - angle: float, angle of rotation of the ellipse in degrees.
+    """
+    # Ensure mask is in the correct format for OpenCV
+    mask = mask.squeeze().astype(np.uint8) * 255  # Convert boolean mask to 0 and 255 format
+
+    # Find contours of the object in the mask
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Check if any contour was found
+    if len(contours) == 0:
+        raise ValueError("No object found in the mask to fit an ellipse.")
+
+    # Find the largest contour by area (assume it's the object)
+    largest_contour = max(contours, key=cv2.contourArea)
+
+    # Fit an ellipse to the largest contour
+    if len(largest_contour) < 5:
+        raise ValueError("Not enough points to fit an ellipse.")
+
+    ellipse = cv2.fitEllipse(largest_contour)
+
+    # Extract parameters for drawing
+    center = (int(ellipse[0][0]), int(ellipse[0][1]))  # Center (x, y)
+    axes = (int(ellipse[1][0] / 2), int(ellipse[1][1] / 2))  # Half lengths of major and minor axes
+    angle = ellipse[2]  # Rotation angle
+
+    # Swap axes if major axis is shorter than minor axis
+    if axes[0] < axes[1]:
+        axes = (axes[1], axes[0])  # Swap major and minor axes
+        angle += 90  # Adjust angle accordingly
+        angle %= 180  # Ensure angle stays within [0, 180) range
+    
+    angle_x_axis = 180 - angle
+
+    return center, axes, angle, angle_x_axis
+
+
 def get_track_data(mask, h, w):
     track_data = {}
     # for drawing predictions on video
     line_mask = Masks(torch.tensor(mask), (h, w)).xy[0]
-    # bbox_xyxy = mask_to_bbox(mask.squeeze())
-    # bbox_xywh = Boxes(torch.tensor([[*bbox_xyxy, 0., 0]]), (h, w)).xywh[0]
 
     track_data['line mask'] = line_mask
     # track_data['bbox_xyxy'] = bbox_xyxy
     centroid_point = Polygon(line_mask).centroid
 
     # for collecting data
-    # centre_x, center_y = bbox_xywh[0], bbox_xywh[1]
     size_in_pixels = mask.sum()
 
     if not centroid_point.is_empty:
-        track_data['centre x'] = int(centroid_point.x)
-        track_data['centre y'] = int(centroid_point.y)
+        track_data['centroid x'] = int(centroid_point.x)
+        track_data['centroid y'] = int(centroid_point.y)
     else:
-        track_data['centre x'] = None
-        track_data['centre y'] = None
-    track_data['size (pixels)'] = size_in_pixels
+        track_data['centroid x'] = None
+        track_data['centroid y'] = None
+    track_data['polygon size (pixels)'] = size_in_pixels
+
+    center, axes, angle, angle_x_axis = fit_ellipse_to_mask(mask)
+    track_data['ellipse major/minor (ratio)'] = axes[0] / axes[1]
+    track_data['ellipse major axis (pixels)'] = axes[0] * 2
+    track_data['ellipse minor axis (pixels)'] = axes[1] * 2
+    track_data['ellipse angle (degrees)'] = angle_x_axis
 
     return track_data
 
@@ -180,9 +229,9 @@ def get_video_segments(predictor, inference_state, h, w):
             for object_id, object_info in frame_info.items():
                 # Check if object info is empty
                 if object_info:
-                    # If 'centre x' or 'centre y' is None or 'size (pixels)' is 0, 
+                    # If 'centroid x' or 'centroid y' is None or 'size (pixels)' is 0, 
                     # replace with the information from previous frame of the same object
-                    if object_info['centre x'] is None or object_info['centre y'] is None or object_info['size (pixels)'] == 0:
+                    if object_info['centroid x'] is None or object_info['centroid y'] is None or object_info['polygon size (pixels)'] == 0:
                         video_segments[frame_number][object_id] = previous_frame_info[object_id]
 
                     # Update previous frame information for the object
@@ -214,82 +263,41 @@ def get_frame_data_subset(frame_dict, step=1):
     return data
 
 
-def smooth_distances_velocities_angles(frame_dict, window=1, fps=30, scale_factor=0.05, distance_pixel_threshold=0):
+def extract_obj_ids(data):
     """
-    Convert frame numbers to data per second.
+    Extract all object IDs from the given data across all frames.
     
     Args:
-        frame_dict (dict): Dictionary with frame numbers as keys.
-        window (int): Window to average.
+    - data (dict): Data with structure:
+                   {frame_number: {obj_id: {column_name: value, ...}, ...}, ...}
     
     Returns:
-        dict: Dictionary with seconds as keys.
+    - obj_ids (set): A set of unique object IDs found in the data.
     """
-    data = copy.deepcopy(frame_dict)
-
-    first_frame = 0
-    obj_ids = list(data[first_frame].keys())
-    n_frames = len(data)
+    obj_ids = set()
     
-    for obj_id in obj_ids:
-        distances = np.array([item[obj_id]['distance (pixels)'] for index, item in data.items()])
-        distances = pd.Series(distances)
-        distances_moving_averages = distances.rolling(window=window, min_periods=1).mean()
-        
-        velocities = np.array([item[obj_id]['velocity (pixels/frame)'] for index, item in data.items()])
-        velocities = pd.Series(velocities)
-        velocities_moving_averages = velocities.rolling(window=window, min_periods=1).mean()
-
-        angles = np.array([item[obj_id]['angle (degrees)'] for index, item in data.items()])
-        angles = pd.Series(angles)
-        angles_moving_averages = angles.rolling(window=window, min_periods=1).mean()
-
-        for frame in range(n_frames):
-            data[frame][obj_id]['distance (pixels)'] = distances_moving_averages[frame]
-            data[frame][obj_id]['distance (mm)'] = distances_moving_averages[frame] * scale_factor
-            data[frame][obj_id]['velocity (pixels/frame)'] = velocities_moving_averages[frame]
-            data[frame][obj_id]['velocity (mm/second)'] = velocities_moving_averages[frame] * fps * scale_factor
-            data[frame][obj_id]['angle (degrees)'] = angles_moving_averages[frame]
-            if data[frame][obj_id]['distance (pixels)'] <= distance_pixel_threshold:
-                data[frame][obj_id]['is stationary'] = 1
-            else:
-                data[frame][obj_id]['is stationary'] = 0
-
-    return data
-
-
-def calculate_heading_angle(point1, point2, point3):
-    # Define vectors based on the points
-    vector_a = np.array([point2[0] - point1[0], point2[1] - point1[1]])
-    vector_b = np.array([point3[0] - point2[0], point3[1] - point2[1]])
+    # Traverse through the data to collect object IDs
+    for frame, objects in data.items():
+        obj_ids.update(objects.keys())
     
-    # Calculate dot product and magnitudes of vectors
-    dot_product = np.dot(vector_a, vector_b)
-    magnitude_a = np.linalg.norm(vector_a)
-    magnitude_b = np.linalg.norm(vector_b)
-    
-    # Calculate the angle in radians and then convert to degrees
-    angle_rad = np.arccos(dot_product / (magnitude_a * magnitude_b))
-    angle_deg = np.degrees(angle_rad)
-    
-    return angle_deg
+    return obj_ids
 
 
-def add_raw_data(data_obj, fps=30, scale_factor=0.05, distance_pixel_threshold=0):
+def add_raw_data(data_obj, fps=30, scale_factor=0.05, distance_pixel_threshold=0, std_threshold=0.5):
     data = copy.deepcopy(data_obj)
     
     # initialize data for frame 0
-    first_frame = 0
-    obj_ids = list(data[first_frame].keys())
-    # for obj_id in obj_ids:
-    #     data[first_frame][obj_id]['size (mm2)'] = data[first_frame][obj_id]['size (pixels)'] * (scale_factor**2)
-    #     data[first_frame][obj_id]['distance (pixels)'] = 0
-    #     data[first_frame][obj_id]['distance (mm)'] = 0
-    #     data[first_frame][obj_id]['velocity (pixels/frame)'] = 0
-    #     data[first_frame][obj_id]['velocity (mm/second)'] = 0
-    #     # data[first_frame][obj_id]['delta_velocity'] = 0
-    #     data[first_frame][obj_id]['angle (degrees)'] = 0
-    #     data[first_frame][obj_id]['is stationary'] = 0
+    first_frame = list(data.keys())[0]
+    obj_ids = extract_obj_ids(data)
+
+    aggregated_data = defaultdict(lambda: {})
+
+    for obj_id in obj_ids:
+        major_minor_ratio = np.array([item[obj_id]['ellipse major/minor (ratio)'] for index, item in data.items()])
+        mean = np.mean(major_minor_ratio)
+        std = np.std(major_minor_ratio)
+        aggregated_data[obj_id]['ellipse major/minor (ratio) mean'] = mean
+        aggregated_data[obj_id]['ellipse major/minor (ratio) std'] = std
 
     # propagate across frames
     for frame_index in range(0, len(data)):
@@ -298,84 +306,125 @@ def add_raw_data(data_obj, fps=30, scale_factor=0.05, distance_pixel_threshold=0
             previous_frame_index = frame_index - 1
             
             if previous_frame_index < 0:
-                data[frame_index][obj_id]['size (mm2)'] = data[frame_index][obj_id]['size (pixels)'] * (scale_factor**2)
+                # get the frame
+                data[frame_index][obj_id]['frame'] = 0
+
+                # calculate second
+                data[frame_index][obj_id]['second'] = data[frame_index][obj_id]['frame'] / fps
+
+                data[frame_index][obj_id]['polygon size (mm2)'] = data[frame_index][obj_id]['polygon size (pixels)'] * (scale_factor**2)
+
+                # calculate major/minor ratio z-score (based on defined threshold)
+                z_score = (aggregated_data[obj_id]['ellipse major/minor (ratio) mean'] - data[frame_index][obj_id]['ellipse major/minor (ratio)']) / aggregated_data[obj_id]['ellipse major/minor (ratio) std']
+                if data[frame_index][obj_id]['ellipse major/minor (ratio)'] < aggregated_data[obj_id]['ellipse major/minor (ratio) mean']:
+                    data[frame_index][obj_id]['major/minor ratio z-score (based on defined threshold)'] = z_score
+                else:
+                    data[frame_index][obj_id]['major/minor ratio z-score (based on defined threshold)'] = 0
+
+                # check if is elongated
+                if data[frame_index][obj_id]['major/minor ratio z-score (based on defined threshold)'] > std_threshold:
+                    data[frame_index][obj_id]['is elongated'] = 0
+                else:
+                    data[frame_index][obj_id]['is elongated'] = 1
+
                 data[frame_index][obj_id]['distance (pixels)'] = 0
                 data[frame_index][obj_id]['distance (mm)'] = 0
-                data[frame_index][obj_id]['velocity (pixels/frame)'] = 0
-                data[frame_index][obj_id]['velocity (mm/second)'] = 0
-                # data[frame_index][obj_id]['delta_velocity'] = 0
-                data[frame_index][obj_id]['angle (degrees)'] = 0
-                data[frame_index][obj_id]['is stationary'] = 0
+                data[frame_index][obj_id]['speed (pixels/frame)'] = 0
+                data[frame_index][obj_id]['speed (mm/second)'] = 0
+
                 continue
 
             current_frame_data = data[frame_index][obj_id]
             previous_frame_data = data[previous_frame_index][obj_id]
 
-            current_point = current_frame_data['centre x'], current_frame_data['centre y']
-            previous_point = previous_frame_data['centre x'], previous_frame_data['centre y']
+            current_point = current_frame_data['centroid x'], current_frame_data['centroid y']
+            previous_point = previous_frame_data['centroid x'], previous_frame_data['centroid y']
+
+            # get the frame
+            current_frame_data['frame'] = frame_index
+
+            # calculate second
+            second = frame_index / fps
+            current_frame_data['second'] = second
 
             # calculate size
-            current_frame_data['size (mm2)'] = current_frame_data['size (pixels)'] * (scale_factor**2)
+            current_frame_data['polygon size (mm2)'] = current_frame_data['polygon size (pixels)'] * (scale_factor**2)
+
+            # calculate major/minor ratio z-score (based on defined threshold)
+            z_score = (aggregated_data[obj_id]['ellipse major/minor (ratio) mean'] - current_frame_data['ellipse major/minor (ratio)']) / aggregated_data[obj_id]['ellipse major/minor (ratio) std']
+            if current_frame_data['ellipse major/minor (ratio)'] < aggregated_data[obj_id]['ellipse major/minor (ratio) mean']:
+                current_frame_data['major/minor ratio z-score (based on defined threshold)'] = z_score
+            else:
+                current_frame_data['major/minor ratio z-score (based on defined threshold)'] = 0
+
+            # check if is elongated
+            if current_frame_data['major/minor ratio z-score (based on defined threshold)'] > std_threshold:
+                current_frame_data['is elongated'] = 0
+            else:
+                current_frame_data['is elongated'] = 1          
 
             # calculate distance
             dist = distance.euclidean(current_point, previous_point)
             current_frame_data['distance (pixels)'] = dist
-            current_frame_data['distance (mm)'] = dist * scale_factor
+            current_frame_data['distance (mm)'] = current_frame_data['distance (pixels)'] * scale_factor
 
-            # calculate velocity
-            velocity = current_frame_data['distance (pixels)']
-            current_frame_data['velocity (pixels/frame)'] = velocity
-            current_frame_data['velocity (mm/second)'] = velocity * fps * scale_factor
-
-            # calculate change in velocity
-            # delta_velocity = current_frame_data['velocity'] - previous_frame_data['velocity']
-            # current_frame_data['delta_velocity'] = delta_velocity
-
-            # calculate angle of heading
-            point1_frame_index = frame_index - 2
-            point2_frame_index = frame_index - 1
-            point3_frame_index = frame_index
-
-            if point1_frame_index < 0:
-                current_frame_data['angle (degrees)'] = 0
-            else:
-                point1 = (data[point1_frame_index][obj_id]['centre x'], data[point1_frame_index][obj_id]['centre y'])
-                point2 = (data[point2_frame_index][obj_id]['centre x'], data[point2_frame_index][obj_id]['centre y'])
-                point3 = (data[point3_frame_index][obj_id]['centre x'], data[point3_frame_index][obj_id]['centre y'])
-
-                angle = calculate_heading_angle(point1, point2, point3)
-                if np.isnan(angle):
-                    current_frame_data['angle (degrees)'] = 0
-                else:
-                    current_frame_data['angle (degrees)'] = angle
-
-            # set is_stationary
-            if current_frame_data['distance (pixels)'] <= distance_pixel_threshold:
-                current_frame_data['is stationary'] = 1
-            else:
-                current_frame_data['is stationary'] = 0
+            # calculate speed
+            speed = current_frame_data['distance (pixels)']
+            current_frame_data['speed (pixels/frame)'] = speed
+            current_frame_data['speed (mm/second)'] = speed * fps * scale_factor
 
     return data
+
+
+def process_raw_data(data, threshold=4):
+    """
+    Process raw data to detect outliers in 'speed (mm/second)' for each object across frames.
+    
+    Args:
+    - data (dict): Nested dictionary with structure:
+                   {frame_number: {obj_id: {'speed (mm/second)': value, ...}, ...}, ...}
+    - threshold (int, optional): Number of standard deviations to consider a value an outlier. Defaults to 2.
+    
+    Returns:
+    - good_data (dict): Data without the outliers.
+    - bad_data (dict): Data containing only the outliers.
+    """
+    # Initialize containers for good and bad data
+    good_data = {}
+    bad_data = {}
+    
+    # Extract speeds for each obj_id across frames
+    obj_speeds = {}
+    for frame, objects in data.items():
+        for obj_id, obj_data in objects.items():
+            speed = obj_data.get('speed (mm/second)', None)
+            if speed is not None:
+                obj_speeds.setdefault(obj_id, []).append((frame, speed))
+    
+    # Detect outliers for each object
+    for obj_id, speed_data in obj_speeds.items():
+        frames, speeds = zip(*speed_data)  # Separate frames and speeds
+        speeds = np.array(speeds)  # Convert speeds to NumPy array
         
+        # Detect outliers using the provided function
+        outliers, outlier_indices = detect_outliers(speeds, threshold)
+        
+        # Separate good and bad data
+        good_frames = [frames[i] for i in range(len(speeds)) if i not in outlier_indices]
+        bad_frames = [frames[i] for i in outlier_indices]
+        
+        # Populate good_data
+        for frame in good_frames:
+            good_data.setdefault(frame, {}).setdefault(obj_id, {}).update(data[frame][obj_id])
+        
+        # Populate bad_data
+        for frame in bad_frames:
+            bad_data.setdefault(frame, {}).setdefault(obj_id, {}).update(data[frame][obj_id])
+    
+    return good_data, bad_data
 
-# random walk modeling using linear regression
-def random_walk_modeling(values):
-    x = values[:-2]
-    y = values[1:-1]
 
-    # Perform linear regression
-    slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-
-    return slope, intercept, r_value, p_value, std_err
-
-
-def get_pearson_correlation_coefficient(x, y):
-    corr, p_value = stats.pearsonr(x, y)
-
-    return corr
-
-
-def detect_outliers(arr, threshold=2):
+def detect_outliers(arr, threshold=4):
     """
     Detect outliers in a NumPy array using mean and standard deviation.
 
@@ -398,69 +447,72 @@ def detect_outliers(arr, threshold=2):
     return outliers, outlier_indices
 
 
-def get_aggregated_data(data, fps=30, scale_factor=0.05):
+def extract_column_for_obj(data, obj_id, column):
+    """
+    Extract values for a specific column for a particular object across frames from good_data.
+    
+    Args:
+    - data (dict): Filtered data with structure:
+                        {frame_number: {obj_id: {column_name: value, ...}, ...}, ...}
+    - obj_id (int): The ID of the object to extract column values for.
+    - column (str): The column name to extract values for.
+    
+    Returns:
+    - values (list): List of values for the target object and column across frames.
+    """
+    values = []
+    
+    # Traverse through good_data to collect values for the obj_id and column_name
+    for frame, objects in data.items():
+        if obj_id in objects:
+            value = objects[obj_id].get(column, None)
+            if value is not None:
+                values.append(value)
+    
+    return np.array(values)
+
+
+def get_aggregated_data(good_data, bad_data, fps=30, scale_factor=0.05):
     # calculate aggregated data
     aggregated_data = {}
 
-    first_frame = 0
-    obj_ids = list(data[first_frame].keys())
+    first_frame = list(good_data.keys())[0]
+    obj_ids = extract_obj_ids(good_data)
 
     for obj_id in obj_ids:
         temp_data = {}
 
         # calculate min, max, mean and standard deviation of sizes
-        sizes = np.array([item[obj_id]['size (mm2)'] for index, item in data.items()])
-        min_size = np.min(sizes)
-        max_size = np.max(sizes)
+        sizes = extract_column_for_obj(good_data, obj_id, 'polygon size (mm2)')
         mean_size = np.mean(sizes)
-        std_size = np.std(sizes)
-        temp_data['min size (mm2)'] = min_size
-        temp_data['max size (mm2)'] = max_size
-        temp_data['mean size (mm2)'] = mean_size
-        temp_data['std size (mm2)'] = std_size
+        temp_data['mean polygon size (mm2)'] = mean_size
 
-        # calculate min, max, mean and standard deviation of speeds
-        velocities = np.array([item[obj_id]['velocity (mm/second)'] for index, item in data.items()])
-        # min_velocity = np.min(velocities)
-        max_velocity = np.max(velocities)
-        mean_velocity = np.mean(velocities)
-        std_velocity = np.std(velocities)
-        # temp_data['min speed (mm/second)'] = min_velocity
-        temp_data['max speed (mm/second)'] = max_velocity
-        temp_data['mean speed (mm/second)'] = mean_velocity
-        temp_data['std speed (mm/second)'] = std_velocity
+        # calculate 'is elongated'
+        is_elongated = extract_column_for_obj(good_data, obj_id, 'is elongated')
 
-        # calculate accumulated distance
-        distances = [item[obj_id]['distance (mm)'] for index, item in data.items()]
-        temp_data['accumulated distance (mm)'] = sum(distances)
+        # calculate mean speeds elongated and overall
+        speeds = extract_column_for_obj(good_data, obj_id, 'speed (mm/second)')
+        mean_speed_elongated = np.mean(speeds * is_elongated)
+        mean_speed = np.mean(speeds)
+        temp_data['mean speed in elongated state (mm/second)'] = mean_speed_elongated
+        temp_data['mean speed (mm/second)'] = mean_speed
 
-        # calculate time spent stationary
-        is_stationary = [item[obj_id]['is stationary'] for index, item in data.items()]
-        # temp_data['time spent stationary (frames)'] = sum(is_stationary)
-        temp_data['time spent stationary (seconds)'] = sum(is_stationary) / fps
+        # calculate during 'elongated' state
+        distances = extract_column_for_obj(good_data, obj_id, 'distance (mm)')
+        temp_data['distance during elongated state (mm)'] = np.sum(distances * is_elongated)
+        temp_data['distance (mm)'] = np.sum(distances)
 
-        # calculate coefficient of correlation for velocities
-        velocities = np.array([item[obj_id]['velocity (mm/second)'] for index, item in data.items()])
-        slope, intercept, r_value, p_value, std_err = random_walk_modeling(velocities)
-        temp_data['correlation coefficient for velocities'] = r_value
+        # calculate duration in elongated state
+        temp_data['duration in elongated state (seconds)'] = np.sum(is_elongated) / fps
 
-        # calculate coefficient of correlation for angular velocities
-        angular_velocities = np.array([item[obj_id]['angle (degrees)'] for index, item in data.items()])
-        slope, intercept, r_value, p_value, std_err = random_walk_modeling(angular_velocities)
-        temp_data['correlation coefficient for angles'] = r_value
+        # calculate duration in bent state
+        temp_data['duration in bent state (seconds)'] = np.sum(1 - is_elongated) / fps
 
-        # calculate Pearson correlation coefficient
-        # x = np.array([item[obj_id]['velocity (pixels/frame)'] for index, item in data.items()])[:-2]
-        # y = np.array([item[obj_id]['velocity (pixels/frame)'] for index, item in data.items()])[1:-1]
-        # r = get_pearson_correlation_coefficient(x, y)
-        # temp_data['pearson correlation coefficient'] = r
-
-        # determine if the track data is reliable using mean and standard deviation
-        outliers, outlier_indices = detect_outliers(sizes, threshold=4)
-        if len(outliers) > 0:
-            temp_data['is data reliable'] = 0
-        else:
-            temp_data['is data reliable'] = 1
+        good_frames = extract_column_for_obj(good_data, obj_id, 'frame')
+        bad_frames = extract_column_for_obj(bad_data, obj_id, 'frame')
+        temp_data['number of good frames'] = len(good_frames)
+        temp_data['number of problematic frames'] = len(bad_frames)
+        temp_data['first problematic frame'] = None if len(bad_frames) == 0 else bad_frames[0]
 
         aggregated_data[obj_id] = temp_data
 
@@ -469,23 +521,49 @@ def get_aggregated_data(data, fps=30, scale_factor=0.05):
 
 def write_raw_data(out_dir, csv_dir, data, index_label, exclude=['line mask']):
     os.makedirs(os.path.join(out_dir, csv_dir), exist_ok=True)
-    first_frame = 0
-    first_obj = 0
-    obj_ids = list(data[first_frame].keys())
+
+    if not data:
+        return
+    
+    first_frame = list(data.keys())[0]
+    obj_ids = extract_obj_ids(data)
+    keys = [
+        'frame',
+        'second',
+        'centroid x',
+        'centroid y',
+        'polygon size (pixels)',
+        'polygon size (mm2)',
+        'ellipse major axis (pixels)',
+        'ellipse minor axis (pixels)',
+        'ellipse major/minor (ratio)',
+        'ellipse angle (degrees)',
+        'major/minor ratio z-score (based on defined threshold)',
+        'is elongated',
+        'distance (pixels)',
+        'distance (mm)',
+        'speed (pixels/frame)',
+        'speed (mm/second)'
+    ]
 
     for obj_id in obj_ids:
         data_to_write = {}
-        for second_index in range(len(data)):
+        
+        frames = []
+        # Traverse through good_data to find frames containing the target_obj_id
+        for frame, objects in data.items():
+            if obj_id in objects:
+                frames.append(frame)
+        for frame in frames:
             temp_data = {}
-            keys = data[first_frame][first_obj].keys()
             for key in keys:
                 if key not in exclude:
-                    temp_data[key] = data[second_index][obj_id][key]
-            data_to_write[second_index] = temp_data
+                    temp_data[key] = data[frame][obj_id][key]
+            data_to_write[frame] = temp_data
             
         df = pd.DataFrame(data_to_write)
         df = df.T
-        df.to_csv(os.path.join(out_dir, csv_dir, f'{obj_id}.csv'), index=True, index_label=index_label, float_format='%.4f')
+        df.to_csv(os.path.join(out_dir, csv_dir, f'{obj_id}.csv'), index=False, float_format='%.4f')
 
 
 def write_aggregated_data(out_dir, aggregated_data, fname):
@@ -497,131 +575,47 @@ def write_aggregated_data(out_dir, aggregated_data, fname):
 def draw_track(out_dir, paths_dir, video_segments, h, w):
     os.makedirs(os.path.join(out_dir, paths_dir), exist_ok=True)
 
-    first_frame = 0
+    first_frame = list(video_segments.keys())[0]
     obj_ids = list(video_segments[first_frame].keys())
 
     for obj_id in obj_ids:
         x_list = []
         y_list = []
+        elongated_list = []
+
+        # Load the track data from CSV
+        track_csv_path = os.path.join(out_dir, 'raw_frames', f'{obj_id}.csv')
+        track_data = pd.read_csv(track_csv_path)
 
         for frame_index in range(len(video_segments)):
-            x_list.append(video_segments[frame_index][obj_id]['centre x'])
-            y_list.append(video_segments[frame_index][obj_id]['centre y'])
+            x_list.append(video_segments[frame_index][obj_id]['centroid x'])
+            y_list.append(video_segments[frame_index][obj_id]['centroid y'])
+            elongated_list.append(track_data.iloc[frame_index]['is elongated'])
 
         canvas = np.ones((h, w, 3), np.int32) * 255
 
         pts = np.array(list(zip(x_list, y_list)), np.int32)
 
-        cv2.polylines(canvas, [pts], isClosed=False, color=colors(obj_id+4, True))
+        # Define the color for the object
+        color = colors(obj_id+4, True)
+
+        def lighten_bgr(bgr, factor):
+            # Ensure factor is between 0 and 1
+            factor = max(0, min(factor, 1))
+            # Calculate the lighter shade
+            return tuple(int(c + (255 - c) * factor) for c in bgr)
+
+        # Define a lighter shade of the color
+        light_color = lighten_bgr(color, 0.7)
+
+        for i in range(len(pts) - 1):
+            if elongated_list[i] == 0:
+                cv2.line(canvas, pts[i], pts[i+1], color=light_color, thickness=2)
+            else:
+                cv2.line(canvas, pts[i], pts[i+1], color=color, thickness=2)
 
         # Save the image
         cv2.imwrite(os.path.join(out_dir, paths_dir, f'{obj_id}.png'), canvas)
-
-
-def draw_velocities(out_dir, speeds_dir, data, total_frames, tick_every_seconds=10, fps=30, scale_factor=0.05, ymax=4):
-    os.makedirs(os.path.join(out_dir, speeds_dir), exist_ok=True)
-
-    first_frame = 0
-    obj_ids = list(data[first_frame].keys())
-
-    for obj_id in obj_ids:
-        velocities = []
-
-        for frame_index in range(len(data)):
-            velocities.append(data[frame_index][obj_id]['velocity (mm/second)'])
-
-        # Turn off interactive mode
-        # plt.ioff()
-
-        # Create a figure and axis
-        fig, ax = plt.subplots(figsize=(12, 8))
-
-        # Plot velocities
-        ax.plot(velocities, label='speed')
-
-        # Calculate the number of frames per 30 seconds
-        frames_per_30_sec = tick_every_seconds * fps
-
-        # Generate the positions for x-ticks (in multiples of 30 seconds)
-        x_ticks = np.arange(0, total_frames, frames_per_30_sec)
-        # Generate the corresponding x-tick labels (time in seconds)
-        x_labels = (x_ticks / fps).astype(int)  # Time in seconds
-
-        ax.set_xticks(x_ticks)
-        ax.set_xticklabels(x_labels)
-
-        # Set title and labels
-        ax.set_title(f'Speed Over Time (fps: {fps} frames/second, scale factor: {scale_factor:.4f} mm/pixel)')
-        ax.set_xlabel('Time (seconds)')
-        ax.set_ylabel('Speed (mm/second)')
-
-        # Show grid
-        ax.grid(True)
-
-        ax.legend()
-
-        ax.set_xlim(0, None)
-        ax.set_ylim(0, ymax)
-
-        # Save figure
-        plt.savefig(os.path.join(out_dir, speeds_dir, f'{obj_id}.png'))
-
-        plt.close()
-
-
-def draw_sizes(out_dir, sizes_dir, data, total_frames, tick_every_seconds=10, fps=30, scale_factor=0.05):
-    os.makedirs(os.path.join(out_dir, sizes_dir), exist_ok=True)
-
-    first_frame = 0
-    obj_ids = list(data[first_frame].keys())
-
-    for obj_id in obj_ids:
-        velocities = []
-
-        for frame_index in range(len(data)):
-            velocities.append(data[frame_index][obj_id]['size (mm2)'])
-
-        outliers, outlier_indices = detect_outliers(np.array(velocities), threshold=4)
-
-        # Turn off interactive mode
-        # plt.ioff()
-
-        # Create a figure and axis
-        fig, ax = plt.subplots(figsize=(12, 8))
-
-        # Plot velocities
-        ax.plot(velocities, label='size')
-
-        ax.scatter(outlier_indices, outliers, color='r', label='outlier')
-
-        # Calculate the number of frames per 30 seconds
-        frames_per_30_sec = tick_every_seconds * fps
-
-        # Generate the positions for x-ticks (in multiples of 30 seconds)
-        x_ticks = np.arange(0, total_frames, frames_per_30_sec)
-        # Generate the corresponding x-tick labels (time in seconds)
-        x_labels = (x_ticks / fps).astype(int)  # Time in seconds
-
-        ax.set_xticks(x_ticks)
-        ax.set_xticklabels(x_labels)
-
-        # Set title and labels
-        ax.set_title(f'Size Over Time (fps: {fps} frames/second, scale factor: {scale_factor:.4f} mm/pixel)')
-        ax.set_xlabel('Time (seconds)')
-        ax.set_ylabel('Size (mm2)')
-
-        # Show grid
-        ax.grid(True)
-
-        ax.legend()
-
-        ax.set_xlim(0, None)
-        # ax.set_ylim(0, None)
-
-        # Save figure
-        plt.savefig(os.path.join(out_dir, sizes_dir, f'{obj_id}.png'))
-
-        plt.close()
 
 
 def draw_on_video(video_path, out_dir, out_video_name, video_segments, fps, h, w, duration_of_tracking_path=10):
@@ -658,7 +652,7 @@ def draw_on_video(video_path, out_dir, out_video_name, video_segments, fps, h, w
             annotator.seg_bbox(mask=data['line mask'], mask_color=colors_cache[track_id], label=str(track_id))
 
             track = track_history[track_id]
-            track.append((data['centre x'], data['centre y']))
+            track.append((data['centroid x'], data['centroid y']))
             if len(track) > fps * duration_of_tracking_path:
                 track.pop(0)
                 
@@ -672,7 +666,3 @@ def draw_on_video(video_path, out_dir, out_video_name, video_segments, fps, h, w
     # Release the video writer and capture objects, and close all OpenCV windows
     out.release()
     cap.release()
-
-
-
-
