@@ -39,5 +39,8 @@ A colab notebook was developed to use to pipeline, see 'colab_notebook/Larva tra
 
 The notebook and input videos should be on Google Drive, the output will also be written to Google Drive.
 
-### 2.2 Helper functions
+### 2.2 Sample video
+A short sample video is located at 'sample_video'. This can be used with the pipeline.
+
+### 2.3 Helper functions
 The notebook uses helper functions in 'sam2/utils/utils.py'. These functions are unique to the larva tracking project.
