@@ -172,6 +172,7 @@ def get_track_data(mask, h, w):
         track_data['ellipse major axis (pixels)'] = None
         track_data['ellipse minor axis (pixels)'] = None
         track_data['ellipse angle (degrees)'] = None
+        return track_data
 
     track_data['ellipse major/minor (ratio)'] = axes[0] / axes[1]
     track_data['ellipse major axis (pixels)'] = axes[0] * 2
