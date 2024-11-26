@@ -165,7 +165,14 @@ def get_track_data(mask, h, w):
         track_data['centroid y'] = None
     track_data['polygon size (pixels)'] = size_in_pixels
 
-    center, axes, angle, angle_x_axis = fit_ellipse_to_mask(mask)
+    try:
+        center, axes, angle, angle_x_axis = fit_ellipse_to_mask(mask)
+    except:
+        track_data['ellipse major/minor (ratio)'] = None
+        track_data['ellipse major axis (pixels)'] = None
+        track_data['ellipse minor axis (pixels)'] = None
+        track_data['ellipse angle (degrees)'] = None
+
     track_data['ellipse major/minor (ratio)'] = axes[0] / axes[1]
     track_data['ellipse major axis (pixels)'] = axes[0] * 2
     track_data['ellipse minor axis (pixels)'] = axes[1] * 2
@@ -231,7 +238,8 @@ def get_video_segments(predictor, inference_state, h, w):
                 if object_info:
                     # If 'centroid x' or 'centroid y' is None or 'size (pixels)' is 0, 
                     # replace with the information from previous frame of the same object
-                    if object_info['centroid x'] is None or object_info['centroid y'] is None or object_info['polygon size (pixels)'] == 0:
+                    if object_info['centroid x'] is None or object_info['centroid y'] is None or object_info['polygon size (pixels)'] == 0 \
+                        or object_info['ellipse angle (degrees)'] is None:
                         video_segments[frame_number][object_id] = previous_frame_info[object_id]
 
                     # Update previous frame information for the object
