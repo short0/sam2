@@ -167,17 +167,16 @@ def get_track_data(mask, h, w):
 
     try:
         center, axes, angle, angle_x_axis = fit_ellipse_to_mask(mask)
+        track_data['ellipse major/minor (ratio)'] = axes[0] / axes[1]
+        track_data['ellipse major axis (pixels)'] = axes[0] * 2
+        track_data['ellipse minor axis (pixels)'] = axes[1] * 2
+        track_data['ellipse angle (degrees)'] = angle_x_axis
     except:
         track_data['ellipse major/minor (ratio)'] = None
         track_data['ellipse major axis (pixels)'] = None
         track_data['ellipse minor axis (pixels)'] = None
         track_data['ellipse angle (degrees)'] = None
         return track_data
-
-    track_data['ellipse major/minor (ratio)'] = axes[0] / axes[1]
-    track_data['ellipse major axis (pixels)'] = axes[0] * 2
-    track_data['ellipse minor axis (pixels)'] = axes[1] * 2
-    track_data['ellipse angle (degrees)'] = angle_x_axis
 
     return track_data
 
