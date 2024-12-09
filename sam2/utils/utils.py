@@ -147,31 +147,36 @@ def fit_ellipse_to_mask(mask):
 
 def get_track_data(mask, h, w):
     track_data = {}
-    # for drawing predictions on video
-    line_mask = Masks(torch.tensor(mask), (h, w)).xy[0]
-
-    track_data['line mask'] = line_mask
-    # track_data['bbox_xyxy'] = bbox_xyxy
-    centroid_point = Polygon(line_mask).centroid
-
-    # for collecting data
-    size_in_pixels = mask.sum()
-
-    if not centroid_point.is_empty:
-        track_data['centroid x'] = int(centroid_point.x)
-        track_data['centroid y'] = int(centroid_point.y)
-    else:
-        track_data['centroid x'] = None
-        track_data['centroid y'] = None
-    track_data['polygon size (pixels)'] = size_in_pixels
 
     try:
+        # for drawing predictions on video
+        line_mask = Masks(torch.tensor(mask), (h, w)).xy[0]
+
+        track_data['line mask'] = line_mask
+        # track_data['bbox_xyxy'] = bbox_xyxy
+        centroid_point = Polygon(line_mask).centroid
+
+        # for collecting data
+        size_in_pixels = mask.sum()
+
+        if not centroid_point.is_empty:
+            track_data['centroid x'] = int(centroid_point.x)
+            track_data['centroid y'] = int(centroid_point.y)
+        else:
+            track_data['centroid x'] = None
+            track_data['centroid y'] = None
+        track_data['polygon size (pixels)'] = size_in_pixels
+
         center, axes, angle, angle_x_axis = fit_ellipse_to_mask(mask)
         track_data['ellipse major/minor (ratio)'] = axes[0] / axes[1]
         track_data['ellipse major axis (pixels)'] = axes[0] * 2
         track_data['ellipse minor axis (pixels)'] = axes[1] * 2
         track_data['ellipse angle (degrees)'] = angle_x_axis
     except:
+        track_data['line mask'] = None
+        track_data['centroid x'] = None
+        track_data['centroid y'] = None
+        track_data['polygon size (pixels)'] = None
         track_data['ellipse major/minor (ratio)'] = None
         track_data['ellipse major axis (pixels)'] = None
         track_data['ellipse minor axis (pixels)'] = None
