@@ -35,7 +35,7 @@ Aggregated data: mean size, mean speed etc.
 ## 2 Colab notebook
 
 ### 2.1 Overview
-A colab notebook was developed to use to pipeline, see 'colab_notebook/Larva tracking.ipynb'.
+A colab notebook was developed to use to pipeline, see 'colab_notebook/Larva tracking.ipynb' or https://colab.research.google.com/drive/1AGggfdeUJWomf_nYCGrxN40kHJS9lmDG?usp=sharing
 
 The notebook and input videos should be on Google Drive, the output will also be written to Google Drive.
 
