@@ -389,14 +389,17 @@ def add_raw_data(data_obj, fps=30, scale_factor=0.05, std_threshold=0.5):
     return data
 
 
-def process_raw_data(data, threshold=4):
+def process_raw_data(data, speed_outlier_std=5, size_outlier_std=4):
     """
-    Process raw data to detect outliers in 'speed (mm/second)' for each object across frames.
-    
+    Process raw data to detect outliers in 'speed (mm/second)' and 'polygon size (mm2)' for each object across frames.
+
+    TODO: Make outlier args actually optional
+
     Args:
     - data (dict): Nested dictionary with structure:
                    {frame_number: {obj_id: {'speed (mm/second)': value, ...}, ...}, ...}
-    - threshold (int, optional): Number of standard deviations to consider a value an outlier. Defaults to 2.
+    - speed_outlier_std (int, optional): Number of standard deviations to consider a value an outlier (either side of mean). Defaults to 4.
+    - size_outlier_std (int, optional): Number of standard deviations to consider a value an outlier (either side of mean). Defaults to 4.
     
     Returns:
     - good_data (dict): Data without the outliers.
@@ -406,22 +409,28 @@ def process_raw_data(data, threshold=4):
     good_data = {}
     bad_data = {}
     
-    # Extract speeds for each obj_id across frames
-    obj_speeds = {}
+    # Extract speeds and sizes for each obj_id across frames
+    obj_measures = {}
     for frame, objects in data.items():
         for obj_id, obj_data in objects.items():
             speed = obj_data.get('speed (mm/second)', None)
-            if speed is not None:
-                obj_speeds.setdefault(obj_id, []).append((frame, speed))
+            size = obj_data.get('polygon size (mm2)', None)
+            if speed is not None and size is not None:
+                obj_measures.setdefault(obj_id, []).append((frame, speed, size))
     
     # Detect outliers for each object
-    for obj_id, speed_data in obj_speeds.items():
-        frames, speeds = zip(*speed_data)  # Separate frames and speeds
+    for obj_id, obj_measure in obj_measures.items():
+        frames, speeds, sizes = zip(*obj_measure)  # Separate frames, speeds, and sizes
         speeds = np.array(speeds)  # Convert speeds to NumPy array
+        sizes = np.array(sizes)
         
         # Detect outliers using the provided function
-        outliers, outlier_indices = detect_outliers(speeds, threshold)
-        
+        speed_outliers, speed_outlier_indices = detect_outliers(speeds, speed_outlier_std)
+        size_outliers, size_outlier_indices = detect_outliers(sizes, size_outlier_std)
+
+        # Combine outliers together (union together)
+        outlier_indices = np.union1d(speed_outlier_indices, size_outlier_indices)
+
         # Separate good and bad data
         good_frames = [frames[i] for i in range(len(speeds)) if i not in outlier_indices]
         bad_frames = [frames[i] for i in outlier_indices]
@@ -443,7 +452,7 @@ def detect_outliers(arr, threshold=4):
 
     Args:
     - arr (numpy.ndarray): Input array.
-    - threshold (int, optional): Number of standard deviations from mean to consider a value an outlier. Defaults to 2.
+    - threshold (int): Number of standard deviations from mean to consider a value an outlier. Defaults to 4.
 
     Returns:
     - outliers (numpy.ndarray): Array of outlier values.
